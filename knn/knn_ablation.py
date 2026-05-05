@@ -1,19 +1,16 @@
 """
-k-NN Retrieval Ablation — DGEB Benchmark (Updated v3)
-======================================================
+k-NN Retrieval Ablation — DGEB Benchmark 
 Compares two feature representations:
   1. Raw k-mer frequency (L1-normalized) for k = 3, 4, 5
   2. TF-IDF weighted k-mers for k = 3, 4, 5
 
 Metrics:
   - nDCG@10, MRR, Precision@10, Recall@10, F1@10, HitRate@10
-
-Run with:
-    python3 knn_ablation_v3.py
 """
 
 import json
 import datetime
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import Counter
@@ -24,41 +21,36 @@ from sklearn.preprocessing import normalize
 from sklearn.neighbors import NearestNeighbors
 
 
-# ══════════════════════════════════════════════════════════════
-# STEP 1: k-mer feature extraction
-# ══════════════════════════════════════════════════════════════
-
+# k-mer feature extraction
 def kmer_counts(sequence, k):
     return Counter(sequence[i:i+k] for i in range(len(sequence) - k + 1))
 
 
-def build_feature_matrix(sequences, k, vectorizer=None, tfidf=None):
+def build_raw_count_matrix(sequences, k, vectorizer=None):
+    """
+    Returns a RAW (un-normalised) count matrix and the fitted vectorizer.
+    Kept separate so TF-IDF can be fit on true counts.
+    """
     kmer_dicts = [kmer_counts(seq, k=k) for seq in sequences]
-
     if vectorizer is None:
         vectorizer = DictVectorizer(sparse=True)
         X = vectorizer.fit_transform(kmer_dicts)
     else:
         X = vectorizer.transform(kmer_dicts)
-
-    if tfidf is not None:
-        X = tfidf.transform(X)
-    else:
-        X = normalize(X, norm="l1")
-
     return X, vectorizer
 
 
-def build_tfidf_transformer(X_corpus):
+def apply_l1_norm(X):
+    return normalize(X, norm="l1")
+
+
+def build_tfidf_transformer(X_raw_counts):
     tfidf = TfidfTransformer(norm="l2", use_idf=True, smooth_idf=True)
-    tfidf.fit(X_corpus)
+    tfidf.fit(X_raw_counts)
     return tfidf
 
 
-# ══════════════════════════════════════════════════════════════
-# STEP 2: Download data
-# ══════════════════════════════════════════════════════════════
-
+# Download data
 def download_data():
     print("Downloading datasets from HuggingFace...")
     arch_ds    = load_dataset("tattabio/arch_retrieval")
@@ -69,11 +61,11 @@ def download_data():
     return arch_ds, arch_qrels, euk_ds, euk_qrels
 
 
-# ══════════════════════════════════════════════════════════════
-# STEP 3: Extract queries, corpus, and ground truth
-# ══════════════════════════════════════════════════════════════
-
+# Extract queries, corpus, and ground truth
 def extract_retrieval_data(ds, qrels_ds, label):
+    """
+    Returns query_records, ground_truth, and corpus_records.
+    """
     qrel_split = list(qrels_ds.keys())[0]
     qrels      = qrels_ds[qrel_split]
 
@@ -86,6 +78,7 @@ def extract_retrieval_data(ds, qrels_ds, label):
     corpus  = ds[corpus_split]
 
     print(f"[{label}] Queries : {len(queries)}  |  Corpus : {len(corpus)}  |  Qrels : {len(qrels)}")
+    print(f"[{label}] corpus_split='{corpus_split}'  query_split='{query_split}'")
 
     ground_truth = {}
     for row in qrels:
@@ -98,52 +91,46 @@ def extract_retrieval_data(ds, qrels_ds, label):
     return query_records, ground_truth, corpus_records
 
 
-# ══════════════════════════════════════════════════════════════
-# STEP 4: Build merged bacterial corpus
-# ══════════════════════════════════════════════════════════════
-
-def build_bacterial_corpus(arch_ds, euk_ds):
+# Build merged bacterial corpus
+def build_bacterial_corpus(arch_corpus_records, euk_corpus_records):
     seen_ids         = set()
     bacterial_corpus = []
 
-    for ds_split in [arch_ds["train"], euk_ds["train"]]:
-        for row in ds_split:
-            entry_id = str(row["Entry"])
+    for records in [arch_corpus_records, euk_corpus_records]:
+        for entry_id, seq in records:
             if entry_id not in seen_ids:
-                bacterial_corpus.append((entry_id, row["Sequence"]))
+                bacterial_corpus.append((entry_id, seq))
                 seen_ids.add(entry_id)
 
     print(f"Bacterial corpus: {len(bacterial_corpus)} unique sequences")
     return bacterial_corpus
 
 
-# ══════════════════════════════════════════════════════════════
-# STEP 5: Build k-NN index
-# ══════════════════════════════════════════════════════════════
-
+# Build k-NN index
 def build_knn_index(corpus_matrix):
-    nn = NearestNeighbors(metric="cosine", algorithm="brute", n_jobs=1)
+    nn = NearestNeighbors(metric="cosine", algorithm="brute", n_jobs=-1)
     nn.fit(corpus_matrix)
     return nn
 
 
-# ══════════════════════════════════════════════════════════════
-# STEP 6: Retrieve top-k for one query
-# ══════════════════════════════════════════════════════════════
+# Retrieve top-k for one query
+def knn_retrieve(query_seq, knn_index, vectorizer, corpus_ids, k_mer, tfidf=None, top_k=10):
+    """
+    Encodes the query using the fitted vectorizer (and optionally TF-IDF),
+    then returns the top_k corpus IDs ranked by cosine similarity.
+    """
+    X_raw, _ = build_raw_count_matrix([query_seq], k=k_mer, vectorizer=vectorizer)
 
-def knn_retrieve(query_seq, knn_index, vectorizer, corpus_ids,
-                 k_mer, tfidf=None, top_k=10):
-    X_query, _ = build_feature_matrix(
-        [query_seq], k=k_mer, vectorizer=vectorizer, tfidf=tfidf
-    )
+    if tfidf is not None:
+        X_query = tfidf.transform(X_raw)   # TF-IDF path 
+    else:
+        X_query = apply_l1_norm(X_raw)     # Raw frequency path
+
     distances, indices = knn_index.kneighbors(X_query, n_neighbors=top_k)
     return [corpus_ids[i] for i in indices[0]]
 
 
-# ══════════════════════════════════════════════════════════════
-# STEP 7: Metrics
-# ══════════════════════════════════════════════════════════════
-
+# Metrics
 def ndcg_at_k(ranked_ids, relevant_ids, k=10):
     """
     Normalized Discounted Cumulative Gain.
@@ -161,7 +148,6 @@ def mrr(ranked_ids, relevant_ids):
     """
     Mean Reciprocal Rank.
     Returns 1/rank of the first relevant item found, else 0.
-    Example: first relevant item at rank 3 -> MRR = 1/3 = 0.333
     """
     for rank, seq_id in enumerate(ranked_ids, start=1):
         if seq_id in relevant_ids:
@@ -172,7 +158,6 @@ def mrr(ranked_ids, relevant_ids):
 def precision_at_k(ranked_ids, relevant_ids, k=10):
     """
     Precision@k: fraction of top-k retrieved results that are relevant.
-    Example: 3 relevant in top 10 -> 0.30
     """
     hits = sum(1 for seq_id in ranked_ids[:k] if seq_id in relevant_ids)
     return hits / k
@@ -181,7 +166,6 @@ def precision_at_k(ranked_ids, relevant_ids, k=10):
 def recall_at_k(ranked_ids, relevant_ids, k=10):
     """
     Recall@k: fraction of all relevant items that appear in top-k.
-    Example: found 3 out of 20 relevant -> 0.15
     """
     if not relevant_ids:
         return 0.0
@@ -202,15 +186,11 @@ def f1_at_k(ranked_ids, relevant_ids, k=10):
 def hit_rate_at_k(ranked_ids, relevant_ids, k=10):
     """
     Hit Rate@k: 1 if at least one relevant item is in top-k, else 0.
-    Answers: did the method find anything useful at all?
     """
     return 1.0 if any(seq_id in relevant_ids for seq_id in ranked_ids[:k]) else 0.0
 
 
-# ══════════════════════════════════════════════════════════════
-# STEP 8: Evaluate over all queries
-# ══════════════════════════════════════════════════════════════
-
+# Evaluate over all queries
 def evaluate_knn(query_records, ground_truth, knn_index,
                  vectorizer, corpus_ids, k_mer, tfidf=None, k=10):
     """
@@ -219,6 +199,7 @@ def evaluate_knn(query_records, ground_truth, knn_index,
     """
     per_query_data = []
     total          = len(query_records)
+    t0             = time.time()
 
     for i, (query_id, seq) in enumerate(query_records):
         if query_id not in ground_truth:
@@ -238,20 +219,23 @@ def evaluate_knn(query_records, ground_truth, knn_index,
             hr_score   = hit_rate_at_k(ranked_ids, relevant_ids, k)
 
             per_query_data.append({
-                "query_id":  query_id,
-                "ndcg":      ndcg_score,
-                "mrr":       mrr_score,
-                "precision": p_score,
-                "recall":    r_score,
-                "f1":        f1_score,
-                "hit_rate":  hr_score,
+                "query_id":   query_id,
+                "ndcg":       ndcg_score,
+                "mrr":        mrr_score,
+                "precision":  p_score,
+                "recall":     r_score,
+                "f1":         f1_score,
+                "hit_rate":   hr_score,
                 "seq_length": len(seq),
             })
 
+            elapsed = time.time() - t0
+            eta     = (elapsed / (i + 1)) * (total - i - 1)
             print(f"  [{i+1}/{total}] {query_id}: "
                   f"nDCG={ndcg_score:.3f}  MRR={mrr_score:.3f}  "
                   f"P={p_score:.3f}  R={r_score:.3f}  "
-                  f"F1={f1_score:.3f}  HR={hr_score:.0f}")
+                  f"F1={f1_score:.3f}  HR={hr_score:.0f}  "
+                  f"ETA={eta:.0f}s")
 
         except Exception as e:
             print(f"  [{i+1}/{total}] {query_id}: ERROR -- {e}")
@@ -270,10 +254,7 @@ def evaluate_knn(query_records, ground_truth, knn_index,
     return means, per_query_data
 
 
-# ══════════════════════════════════════════════════════════════
-# STEP 9: Plotting
-# ══════════════════════════════════════════════════════════════
-
+# Plotting
 def plot_score_distribution(all_per_query, method_labels, dataset_label, filename):
     """
     Histogram of per-query nDCG@10 scores for each method.
@@ -340,25 +321,30 @@ def plot_metrics_bar(all_means, method_labels, dataset_label, filename):
     print(f"Saved -> {filename}")
 
 
-# ══════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════
+# Baseline scores stored as named constants
+BLAST_ARCH_NDCG          = 0.9310
+BLAST_EUK_NDCG           = 0.8692
+LOGREG_IMPROVED_ARCH     = 0.0632
+LOGREG_IMPROVED_EUK      = 0.1158
+LOGREG_BASELINE_ARCH     = 0.0030
+LOGREG_BASELINE_EUK      = 0.1363
+
 
 if __name__ == "__main__":
 
     # 1. Download data once
     arch_ds, arch_qrels, euk_ds, euk_qrels = download_data()
 
-    # 2. Extract queries and ground truth once
-    arch_query_records, arch_ground_truth, _ = extract_retrieval_data(
+    # 2. Extract queries, ground truth, AND corpus records
+    arch_query_records, arch_ground_truth, arch_corpus_records = extract_retrieval_data(
         arch_ds, arch_qrels, "Arch"
     )
-    euk_query_records, euk_ground_truth, _ = extract_retrieval_data(
+    euk_query_records, euk_ground_truth, euk_corpus_records = extract_retrieval_data(
         euk_ds, euk_qrels, "Euk"
     )
 
-    # 3. Build bacterial corpus once
-    bacterial_corpus = build_bacterial_corpus(arch_ds, euk_ds)
+    # 3. Build bacterial corpus from the CORRECT corpus splits
+    bacterial_corpus = build_bacterial_corpus(arch_corpus_records, euk_corpus_records)
     corpus_ids       = [entry_id for entry_id, _ in bacterial_corpus]
     corpus_sequences = [seq for _, seq in bacterial_corpus]
 
@@ -381,19 +367,18 @@ if __name__ == "__main__":
             print(f"  k={k_mer}  |  Features: {feat_label} k-mer frequencies")
             print(f"{'='*60}")
 
-            # Build raw corpus feature matrix
-            print(f"Building {k_mer}-mer features for corpus...")
-            corpus_matrix, vectorizer = build_feature_matrix(
-                corpus_sequences, k=k_mer
-            )
-            print(f"Corpus matrix shape: {corpus_matrix.shape}")
+            # Build RAW count matrix first (needed for TF-IDF fitting)
+            print(f"Building {k_mer}-mer raw count matrix for corpus...")
+            X_raw_corpus, vectorizer = build_raw_count_matrix(corpus_sequences, k=k_mer)
+            print(f"Corpus raw count matrix shape: {X_raw_corpus.shape}")
 
-            # Fit TF-IDF if needed
             tfidf = None
             if use_tfidf:
-                print("Fitting TF-IDF transformer on corpus...")
-                tfidf         = build_tfidf_transformer(corpus_matrix)
-                corpus_matrix = tfidf.transform(corpus_matrix)
+                print("Fitting TF-IDF transformer on raw count matrix...")
+                tfidf         = build_tfidf_transformer(X_raw_corpus)   # fit on raw counts
+                corpus_matrix = tfidf.transform(X_raw_corpus)           # L2-normalised output
+            else:
+                corpus_matrix = apply_l1_norm(X_raw_corpus)             # L1-normalised counts
 
             knn_index = build_knn_index(corpus_matrix)
 
@@ -414,8 +399,8 @@ if __name__ == "__main__":
             )
 
             ablation_results[k_mer][feat_label] = {
-                "arch": {k: round(v, 4) for k, v in arch_means.items()},
-                "euk":  {k: round(v, 4) for k, v in euk_means.items()},
+                "arch":      {k: round(v, 4) for k, v in arch_means.items()},
+                "euk":       {k: round(v, 4) for k, v in euk_means.items()},
                 "mean_ndcg": round((arch_means["ndcg"] + euk_means["ndcg"]) / 2, 4),
             }
 
@@ -447,30 +432,38 @@ if __name__ == "__main__":
                       f"{m['f1']:>7.4f} {m['hit_rate']:>7.4f}")
         print()
 
-    # 6. Print full comparison table (nDCG only, for reference vs baselines)
+    # 6. Print full comparison table (nDCG only) 
     print("\n" + "=" * 70)
     print("FULL COMPARISON TABLE (nDCG@10)")
     print("=" * 70)
     print(f"{'Method':<30} {'Arch nDCG@10':>14} {'Euk nDCG@10':>13}")
     print("-" * 70)
-    print(f"{'BLAST (blastp)':<30} {'0.9310':>14} {'0.8692':>13}")
+    print(f"{'BLAST (blastp)':<30} {BLAST_ARCH_NDCG:>14.4f} {BLAST_EUK_NDCG:>13.4f}")
     for k_mer in [3, 4, 5]:
         for feat_label in ["Raw", "TF-IDF"]:
             r    = ablation_results[k_mer][feat_label]
             name = f"k-NN (k={k_mer}, {feat_label})"
             print(f"{name:<30} {r['arch']['ndcg']:>14.4f} {r['euk']['ndcg']:>13.4f}")
-    print(f"{'LogReg (improved)':<30} {'0.0632':>14} {'0.1158':>13}")
-    print(f"{'LogReg (baseline)':<30} {'0.0030':>14} {'0.1363':>13}")
+    print(f"{'LogReg (improved)':<30} {LOGREG_IMPROVED_ARCH:>14.4f} {LOGREG_IMPROVED_EUK:>13.4f}")
+    print(f"{'LogReg (baseline)':<30} {LOGREG_BASELINE_ARCH:>14.4f} {LOGREG_BASELINE_EUK:>13.4f}")
 
     # 7. Save full results to JSON
-    with open("knn_ablation_results_v3.json", "w") as f:
+    with open("knn_ablation_results_fixed.json", "w") as f:
         json.dump({
             "generated_at":        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "ablation":            ablation_results,
+            "baselines": {
+                "BLAST_arch":           BLAST_ARCH_NDCG,
+                "BLAST_euk":            BLAST_EUK_NDCG,
+                "LogReg_improved_arch": LOGREG_IMPROVED_ARCH,
+                "LogReg_improved_euk":  LOGREG_IMPROVED_EUK,
+                "LogReg_baseline_arch": LOGREG_BASELINE_ARCH,
+                "LogReg_baseline_euk":  LOGREG_BASELINE_EUK,
+            },
             "best_arch_per_query": best_arch_per_query,
             "best_euk_per_query":  best_euk_per_query,
         }, f, indent=2)
-    print("\nSaved -> knn_ablation_results_v3.json")
+    print("\nSaved -> knn_ablation_results_fixed.json")
 
     # 8. Score distribution plots for best method (k=4, TF-IDF)
     if best_arch_per_query:
@@ -478,17 +471,17 @@ if __name__ == "__main__":
             all_per_query = [best_arch_per_query],
             method_labels = ["k-NN (k=4, TF-IDF)"],
             dataset_label = "Arch",
-            filename      = "dist_arch_knn_v3.png"
+            filename      = "dist_arch_knn_fixed.png"
         )
         plot_length_vs_score(
             best_arch_per_query, "ndcg",
             "k-NN (k=4, TF-IDF)", "Arch",
-            "length_vs_ndcg_arch_v3.png"
+            "length_vs_ndcg_arch_fixed.png"
         )
         plot_length_vs_score(
             best_arch_per_query, "f1",
             "k-NN (k=4, TF-IDF)", "Arch",
-            "length_vs_f1_arch_v3.png"
+            "length_vs_f1_arch_fixed.png"
         )
 
     if best_euk_per_query:
@@ -496,25 +489,25 @@ if __name__ == "__main__":
             all_per_query = [best_euk_per_query],
             method_labels = ["k-NN (k=4, TF-IDF)"],
             dataset_label = "Euk",
-            filename      = "dist_euk_knn_v3.png"
+            filename      = "dist_euk_knn_fixed.png"
         )
         plot_length_vs_score(
             best_euk_per_query, "ndcg",
             "k-NN (k=4, TF-IDF)", "Euk",
-            "length_vs_ndcg_euk_v3.png"
+            "length_vs_ndcg_euk_fixed.png"
         )
         plot_length_vs_score(
             best_euk_per_query, "f1",
             "k-NN (k=4, TF-IDF)", "Euk",
-            "length_vs_f1_euk_v3.png"
+            "length_vs_f1_euk_fixed.png"
         )
 
     # 9. Metrics bar chart across all methods
     plot_metrics_bar(
         arch_means_all, method_labels, "Arch",
-        "metrics_bar_arch_knn_v3.png"
+        "metrics_bar_arch_knn_fixed.png"
     )
     plot_metrics_bar(
         euk_means_all, method_labels, "Euk",
-        "metrics_bar_euk_knn_v3.png"
+        "metrics_bar_euk_knn_fixed.png"
     )
