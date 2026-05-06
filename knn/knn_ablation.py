@@ -448,7 +448,7 @@ if __name__ == "__main__":
     print(f"{'LogReg (baseline)':<30} {LOGREG_BASELINE_ARCH:>14.4f} {LOGREG_BASELINE_EUK:>13.4f}")
 
     # 7. Save full results to JSON
-    with open("knn_ablation_results_fixed.json", "w") as f:
+    with open("knn_ablation_results.json", "w") as f:
         json.dump({
             "generated_at":        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "ablation":            ablation_results,
@@ -463,7 +463,7 @@ if __name__ == "__main__":
             "best_arch_per_query": best_arch_per_query,
             "best_euk_per_query":  best_euk_per_query,
         }, f, indent=2)
-    print("\nSaved -> knn_ablation_results_fixed.json")
+    print("\nSaved -> knn_ablation_results.json")
 
     # 8. Score distribution plots for best method (k=4, TF-IDF)
     if best_arch_per_query:
@@ -471,17 +471,17 @@ if __name__ == "__main__":
             all_per_query = [best_arch_per_query],
             method_labels = ["k-NN (k=4, TF-IDF)"],
             dataset_label = "Arch",
-            filename      = "dist_arch_knn_fixed.png"
+            filename      = "dist_arch_knn.png"
         )
         plot_length_vs_score(
             best_arch_per_query, "ndcg",
             "k-NN (k=4, TF-IDF)", "Arch",
-            "length_vs_ndcg_arch_fixed.png"
+            "length_vs_ndcg_arch.png"
         )
         plot_length_vs_score(
             best_arch_per_query, "f1",
             "k-NN (k=4, TF-IDF)", "Arch",
-            "length_vs_f1_arch_fixed.png"
+            "length_vs_f1_arch.png"
         )
 
     if best_euk_per_query:
@@ -489,25 +489,25 @@ if __name__ == "__main__":
             all_per_query = [best_euk_per_query],
             method_labels = ["k-NN (k=4, TF-IDF)"],
             dataset_label = "Euk",
-            filename      = "dist_euk_knn_fixed.png"
+            filename      = "dist_euk_knn.png"
         )
         plot_length_vs_score(
             best_euk_per_query, "ndcg",
             "k-NN (k=4, TF-IDF)", "Euk",
-            "length_vs_ndcg_euk_fixed.png"
+            "length_vs_ndcg_euk.png"
         )
         plot_length_vs_score(
             best_euk_per_query, "f1",
             "k-NN (k=4, TF-IDF)", "Euk",
-            "length_vs_f1_euk_fixed.png"
+            "length_vs_f1_euk.png"
         )
 
     # 9. Metrics bar chart across all methods
     plot_metrics_bar(
         arch_means_all, method_labels, "Arch",
-        "metrics_bar_arch_knn_fixed.png"
+        "metrics_bar_arch_knn.png"
     )
     plot_metrics_bar(
         euk_means_all, method_labels, "Euk",
-        "metrics_bar_euk_knn_fixed.png"
+        "metrics_bar_euk_knn.png"
     )
